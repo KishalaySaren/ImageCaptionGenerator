@@ -1,68 +1,46 @@
-import os
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from utils import load_model_and_tokenizer, extract_features, generate_caption
+import streamlit as st
+from transformers import pipeline
+from PIL import Image
+import torch
 
-# ── App setup ────────────────────────────────────────────────────────────
-BACKEND_DIR  = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIR = os.path.join(BACKEND_DIR, "..", "frontend")
+# Page configuration
+st.set_page_config(
+    page_title="AI Image Caption Generator",
+    page_icon="🖼️",
+    layout="centered"
+)
 
-# Normalise so it works in Docker and locally
-FRONTEND_DIR = os.path.normpath(FRONTEND_DIR)
+st.title("🖼️ AI Image Caption Generator")
+st.write("Upload an image and generate an AI-powered caption instantly.")
 
-app = Flask(__name__, static_folder=FRONTEND_DIR)
-CORS(app)
+# Load model (cached to avoid reloading)
+@st.cache_resource
+def load_model():
+    return pipeline(
+        "image-to-text",
+        model="Salesforce/blip-image-captioning-base"
+    )
 
-UPLOAD_FOLDER = os.path.join(BACKEND_DIR, "uploads")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+captioner = load_model()
 
-# Load model & tokenizer once at startup
-caption_model, tokenizer = load_model_and_tokenizer()
+# File uploader
+uploaded_file = st.file_uploader(
+    "Upload an Image",
+    type=["jpg", "jpeg", "png"]
+)
 
+if uploaded_file is not None:
+    image = Image.open(uploaded_file).convert("RGB")
+    st.image(image, caption="Uploaded Image", use_column_width=True)
 
-# ── API Routes ───────────────────────────────────────────────────────────
-@app.route("/caption", methods=["POST"])
-def caption():
-    """Accept an image file and return a generated caption."""
-    if "image" not in request.files:
-        return jsonify({"error": "No image file provided. Use key 'image'."}), 400
+    if st.button("Generate Caption"):
+        with st.spinner("Generating caption..."):
+            result = captioner(image)
+            caption = result[0]["generated_text"]
 
-    file = request.files["image"]
-    if file.filename == "":
-        return jsonify({"error": "Empty filename."}), 400
+        st.success("Caption Generated!")
+        st.subheader("📝 Caption:")
+        st.write(caption)
 
-    filepath = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(filepath)
-
-    try:
-        features = extract_features(filepath)
-        caption_text = generate_caption(caption_model, tokenizer, features)
-        return jsonify({"caption": caption_text})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    finally:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    """Simple health-check endpoint."""
-    return jsonify({"status": "ok"})
-
-
-# ── Serve React Frontend ─────────────────────────────────────────────────
-@app.route("/")
-def serve_index():
-    return send_from_directory(FRONTEND_DIR, "index.html")
-
-
-@app.route("/<path:filename>")
-def serve_static(filename):
-    return send_from_directory(FRONTEND_DIR, filename)
-
-
-# ── Entry point ──────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+st.markdown("---")
+st.markdown("Built with ❤️ using Streamlit & Hugging Face Transformers")
