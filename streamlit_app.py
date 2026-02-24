@@ -1,40 +1,68 @@
-import altair as alt
-import numpy as np
-import pandas as pd
-import streamlit as st
+import os
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from utils import load_model_and_tokenizer, extract_features, generate_caption
 
-"""
-# Welcome to Streamlit!
+# ── App setup ────────────────────────────────────────────────────────────
+BACKEND_DIR  = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.join(BACKEND_DIR, "..", "frontend")
 
-Edit `/streamlit_app.py` to customize this app to your heart's desire :heart:.
-If you have any questions, checkout our [documentation](https://docs.streamlit.io) and [community
-forums](https://discuss.streamlit.io).
+# Normalise so it works in Docker and locally
+FRONTEND_DIR = os.path.normpath(FRONTEND_DIR)
 
-In the meantime, below is an example of what you can do with just a few lines of code:
-"""
+app = Flask(__name__, static_folder=FRONTEND_DIR)
+CORS(app)
 
-num_points = st.slider("Number of points in spiral", 1, 10000, 1100)
-num_turns = st.slider("Number of turns in spiral", 1, 300, 31)
+UPLOAD_FOLDER = os.path.join(BACKEND_DIR, "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-indices = np.linspace(0, 1, num_points)
-theta = 2 * np.pi * num_turns * indices
-radius = indices
+# Load model & tokenizer once at startup
+caption_model, tokenizer = load_model_and_tokenizer()
 
-x = radius * np.cos(theta)
-y = radius * np.sin(theta)
 
-df = pd.DataFrame({
-    "x": x,
-    "y": y,
-    "idx": indices,
-    "rand": np.random.randn(num_points),
-})
+# ── API Routes ───────────────────────────────────────────────────────────
+@app.route("/caption", methods=["POST"])
+def caption():
+    """Accept an image file and return a generated caption."""
+    if "image" not in request.files:
+        return jsonify({"error": "No image file provided. Use key 'image'."}), 400
 
-st.altair_chart(alt.Chart(df, height=700, width=700)
-    .mark_point(filled=True)
-    .encode(
-        x=alt.X("x", axis=None),
-        y=alt.Y("y", axis=None),
-        color=alt.Color("idx", legend=None, scale=alt.Scale()),
-        size=alt.Size("rand", legend=None, scale=alt.Scale(range=[1, 150])),
-    ))
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "Empty filename."}), 400
+
+    filepath = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(filepath)
+
+    try:
+        features = extract_features(filepath)
+        caption_text = generate_caption(caption_model, tokenizer, features)
+        return jsonify({"caption": caption_text})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Simple health-check endpoint."""
+    return jsonify({"status": "ok"})
+
+
+# ── Serve React Frontend ─────────────────────────────────────────────────
+@app.route("/")
+def serve_index():
+    return send_from_directory(FRONTEND_DIR, "index.html")
+
+
+@app.route("/<path:filename>")
+def serve_static(filename):
+    return send_from_directory(FRONTEND_DIR, filename)
+
+
+# ── Entry point ──────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
